@@ -367,18 +367,36 @@
         throw EventCLIError.notFound("Reminder with ID '\(id)' not found")
       }
 
-      // Move first so a failed move cannot leave other requested field edits
-      // partially applied. EventKit handles the fast path; Reminders.app keeps
-      // the historical fallback for cross-source moves rejected by ReminderKit.
-      let trimmedListName = listName?.trimmingCharacters(in: .whitespacesAndNewlines)
-      let needsMove =
-        trimmedListName.map {
-          !$0.isEmpty && $0 != original.calendar?.title
-        } ?? false
-      let ekReminder =
-        needsMove
-        ? try moveReminderAcrossLists(original, toListNamed: trimmedListName!)
-        : original
+      // Validate and resolve every non-mutating input before committing a move.
+      let parsedDueDate = try dueDate.map { dateString in
+        DateComponentsBuilder.build(
+          from: try Date.validated(dateTimeString: dateString), timeZone: .current)
+      }
+      let parsedStartDate = try startDate.map { dateString in
+        DateComponentsBuilder.build(
+          from: try Date.validated(dateTimeString: dateString), timeZone: .current)
+      }
+      let targetListName = try Self.validatedTargetListName(listName)
+      let needsMove = Self.requiresListMove(
+        to: targetListName, currentListName: original.calendar?.title
+      )
+      let targetList: EKCalendar?
+      if needsMove {
+        guard
+          let targetListName,
+          let resolved = eventStore.calendars(for: .reminder).first(where: {
+            $0.title == targetListName
+          })
+        else {
+          throw EventCLIError.notFound("List '\(targetListName ?? "")' not found")
+        }
+        targetList = resolved
+      } else {
+        targetList = nil
+      }
+
+      let movedReminder = try targetList.map { try moveReminderAcrossLists(original, to: $0) }
+      let ekReminder = movedReminder ?? original
 
       if let title = title {
         ekReminder.title = title
@@ -398,18 +416,14 @@
 
       if clearDue {
         ekReminder.dueDateComponents = nil
-      } else if let dueDateString = dueDate {
-        let date = try Date.validated(dateTimeString: dueDateString)
-        let components = DateComponentsBuilder.build(from: date, timeZone: .current)
-        ekReminder.dueDateComponents = components
+      } else if let parsedDueDate {
+        ekReminder.dueDateComponents = parsedDueDate
       }
 
       if clearStart {
         ekReminder.startDateComponents = nil
-      } else if let startDateString = startDate {
-        let date = try Date.validated(dateTimeString: startDateString)
-        let components = DateComponentsBuilder.build(from: date, timeZone: .current)
-        ekReminder.startDateComponents = components
+      } else if let parsedStartDate {
+        ekReminder.startDateComponents = parsedStartDate
       }
 
       if let priority = priority {
@@ -425,59 +439,81 @@
         ekReminder.addAlarm(trigger.toEKAlarm())
       }
 
-      do {
-        try eventStore.save(ekReminder, commit: true)
-      } catch {
-        if needsMove {
-          throw EventCLIError.eventKitError(
-            "Cross-list move to '\(trimmedListName!)' succeeded but applying field updates failed: \(error.localizedDescription). The reminder is now in the target list with its pre-update field values."
-          )
+      let hasFieldEdits =
+        title != nil || completed != nil || notes != nil || dueDate != nil
+        || clearDue || startDate != nil || clearStart || priority != nil
+        || locationTrigger != nil || clearLocation
+      if hasFieldEdits {
+        do {
+          try eventStore.save(ekReminder, commit: true)
+        } catch {
+          if needsMove {
+            throw EventCLIError.eventKitError(
+              "Cross-list move to '\(targetListName!)' succeeded but applying field updates failed: \(error.localizedDescription). The reminder is now in the target list with its pre-update field values."
+            )
+          }
+          throw error
         }
-        throw error
       }
       return ekReminder.calendarItemIdentifier
     }
 
-    private func moveReminderAcrossLists(
-      _ reminder: EKReminder, toListNamed targetListName: String
-    ) throws -> EKReminder {
-      guard
-        let targetList = eventStore.calendars(for: .reminder).first(where: {
-          $0.title == targetListName
-        })
-      else {
-        throw EventCLIError.notFound("List '\(targetListName)' not found")
+    static func validatedTargetListName(_ listName: String?) throws -> String? {
+      guard let listName else { return nil }
+      let trimmed = listName.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else {
+        throw EventCLIError.invalidInput("Reminder list name cannot be empty.")
       }
+      return trimmed
+    }
 
+    static func requiresListMove(to targetListName: String?, currentListName: String?) -> Bool {
+      targetListName.map { $0 != currentListName } ?? false
+    }
+
+    private func moveReminderAcrossLists(
+      _ reminder: EKReminder, to targetList: EKCalendar
+    ) throws -> EKReminder {
       let originalTitle = reminder.title ?? ""
       let originalCreationDate = reminder.creationDate
       let originalIdentifier = reminder.calendarItemIdentifier
+      let targetListIdentifier = targetList.calendarIdentifier
+      let targetListTitle = targetList.title
       reminder.calendar = targetList
 
       do {
         try eventStore.save(reminder, commit: true)
         return reminder
       } catch {
+        // Discard the rejected in-memory assignment before invoking Reminders.app
+        // or inspecting EventKit again.
+        eventStore.reset()
         try runAppleScriptMove(
           reminderIdentifier: originalIdentifier,
-          toListNamed: targetList.title
+          toListNamed: targetListTitle
         )
+        eventStore.reset()
         eventStore.refreshSourcesIfNecessary()
 
-        if let moved = eventStore.calendarItem(withIdentifier: originalIdentifier) as? EKReminder,
-          moved.calendar?.title == targetList.title
-        {
-          return moved
+        guard
+          let freshTargetList = eventStore.calendars(for: .reminder).first(where: {
+            $0.calendarIdentifier == targetListIdentifier
+          })
+        else {
+          throw EventCLIError.eventKitError(
+            "Cross-list move completed via Reminders.app but target list '\(targetListTitle)' could not be refreshed. The underlying EventKit error was: \(error.localizedDescription)"
+          )
         }
         if let moved = findReminder(
-          in: targetList,
+          in: freshTargetList,
+          originalIdentifier: originalIdentifier,
           matchingTitle: originalTitle,
           creationDate: originalCreationDate
         ) {
           return moved
         }
         throw EventCLIError.eventKitError(
-          "Cross-list move completed via Reminders.app but the moved reminder could not be located in '\(targetList.title)'. The underlying EventKit error was: \(error.localizedDescription)"
+          "Cross-list move completed via Reminders.app but the moved reminder could not be reliably re-identified in '\(targetListTitle)'; no further field edits were applied. The underlying EventKit error was: \(error.localizedDescription)"
         )
       }
     }
@@ -521,7 +557,10 @@
     }
 
     private func findReminder(
-      in list: EKCalendar, matchingTitle title: String, creationDate: Date?
+      in list: EKCalendar,
+      originalIdentifier: String,
+      matchingTitle title: String,
+      creationDate: Date?
     ) -> EKReminder? {
       let predicate = eventStore.predicateForReminders(in: [list])
       var found: EKReminder?
@@ -529,18 +568,42 @@
       eventStore.fetchReminders(matching: predicate) { reminders in
         defer { semaphore.signal() }
         guard let reminders else { return }
-        if let creationDate {
-          found = reminders.first {
-            ($0.title ?? "") == title
-              && $0.creationDate.map { abs($0.timeIntervalSince(creationDate)) < 1.0 } == true
-          }
+        if let exact = reminders.first(where: {
+          $0.calendarItemIdentifier == originalIdentifier
+        }) {
+          found = exact
+          return
         }
-        if found == nil {
-          found = reminders.first { ($0.title ?? "") == title }
+        let matches = reminders.filter {
+          Self.matchesMovedReminder(
+            candidateIdentifier: $0.calendarItemIdentifier,
+            candidateTitle: $0.title ?? "",
+            candidateCreationDate: $0.creationDate,
+            originalIdentifier: originalIdentifier,
+            originalTitle: title,
+            originalCreationDate: creationDate
+          )
+        }
+        if matches.count == 1 {
+          found = matches[0]
         }
       }
       semaphore.wait()
       return found
+    }
+
+    static func matchesMovedReminder(
+      candidateIdentifier: String,
+      candidateTitle: String,
+      candidateCreationDate: Date?,
+      originalIdentifier: String,
+      originalTitle: String,
+      originalCreationDate: Date?
+    ) -> Bool {
+      if candidateIdentifier == originalIdentifier { return true }
+      guard let candidateCreationDate, let originalCreationDate else { return false }
+      return candidateTitle == originalTitle
+        && abs(candidateCreationDate.timeIntervalSince(originalCreationDate)) < 1.0
     }
   }
 
