@@ -113,6 +113,7 @@
     func updateReminder(
       id: String,
       title: String? = nil,
+      listName: String? = nil,
       completed: Bool? = nil,
       notes: String? = nil,
       dueDate: String? = nil,
@@ -131,9 +132,10 @@
       try await permissionService.ensureRemindersAccess()
 
       // Step 1: Update basic properties via EventKit
-      try updateViaEventKit(
+      let updatedId = try updateViaEventKit(
         id: id,
         title: title,
+        listName: listName,
         completed: completed,
         notes: notes,
         dueDate: dueDate,
@@ -149,7 +151,7 @@
       // Step 2: Post-process with advanced features if needed
       if needsAdvancedProcessing(tags: tags, parentTitle: parentTitle, flagged: flagged, url: url) {
         try await postProcessReminder(
-          id: id,
+          id: updatedId,
           tags: tags,
           parentTitle: parentTitle,
           flagged: flagged,
@@ -159,7 +161,7 @@
       }
 
       // Step 3: Fetch and return final state
-      return try fetchReminder(id: id)
+      return try fetchReminder(id: updatedId)
     }
 
     /// Search reminders by keyword in title and notes
@@ -349,6 +351,7 @@
     private func updateViaEventKit(
       id: String,
       title: String?,
+      listName: String?,
       completed: Bool?,
       notes: String?,
       dueDate: String?,
@@ -359,10 +362,23 @@
       url: String?,
       locationTrigger: LocationTrigger?,
       clearLocation: Bool
-    ) throws {
-      guard let ekReminder = eventStore.calendarItem(withIdentifier: id) as? EKReminder else {
+    ) throws -> String {
+      guard let original = eventStore.calendarItem(withIdentifier: id) as? EKReminder else {
         throw EventCLIError.notFound("Reminder with ID '\(id)' not found")
       }
+
+      // Move first so a failed move cannot leave other requested field edits
+      // partially applied. EventKit handles the fast path; Reminders.app keeps
+      // the historical fallback for cross-source moves rejected by ReminderKit.
+      let trimmedListName = listName?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let needsMove =
+        trimmedListName.map {
+          !$0.isEmpty && $0 != original.calendar?.title
+        } ?? false
+      let ekReminder =
+        needsMove
+        ? try moveReminderAcrossLists(original, toListNamed: trimmedListName!)
+        : original
 
       if let title = title {
         ekReminder.title = title
@@ -409,7 +425,122 @@
         ekReminder.addAlarm(trigger.toEKAlarm())
       }
 
-      try eventStore.save(ekReminder, commit: true)
+      do {
+        try eventStore.save(ekReminder, commit: true)
+      } catch {
+        if needsMove {
+          throw EventCLIError.eventKitError(
+            "Cross-list move to '\(trimmedListName!)' succeeded but applying field updates failed: \(error.localizedDescription). The reminder is now in the target list with its pre-update field values."
+          )
+        }
+        throw error
+      }
+      return ekReminder.calendarItemIdentifier
+    }
+
+    private func moveReminderAcrossLists(
+      _ reminder: EKReminder, toListNamed targetListName: String
+    ) throws -> EKReminder {
+      guard
+        let targetList = eventStore.calendars(for: .reminder).first(where: {
+          $0.title == targetListName
+        })
+      else {
+        throw EventCLIError.notFound("List '\(targetListName)' not found")
+      }
+
+      let originalTitle = reminder.title ?? ""
+      let originalCreationDate = reminder.creationDate
+      let originalIdentifier = reminder.calendarItemIdentifier
+      reminder.calendar = targetList
+
+      do {
+        try eventStore.save(reminder, commit: true)
+        return reminder
+      } catch {
+        try runAppleScriptMove(
+          reminderIdentifier: originalIdentifier,
+          toListNamed: targetList.title
+        )
+        eventStore.refreshSourcesIfNecessary()
+
+        if let moved = eventStore.calendarItem(withIdentifier: originalIdentifier) as? EKReminder,
+          moved.calendar?.title == targetList.title
+        {
+          return moved
+        }
+        if let moved = findReminder(
+          in: targetList,
+          matchingTitle: originalTitle,
+          creationDate: originalCreationDate
+        ) {
+          return moved
+        }
+        throw EventCLIError.eventKitError(
+          "Cross-list move completed via Reminders.app but the moved reminder could not be located in '\(targetList.title)'. The underlying EventKit error was: \(error.localizedDescription)"
+        )
+      }
+    }
+
+    private func runAppleScriptMove(
+      reminderIdentifier: String, toListNamed targetListName: String
+    ) throws {
+      let escapedList = Self.escapeAppleScriptString(targetListName)
+      let script = """
+        tell application "Reminders"
+          set src to first reminder whose id contains "\(reminderIdentifier)"
+          move src to list "\(escapedList)"
+        end tell
+        """
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+      process.arguments = ["-e", script]
+      let errorPipe = Pipe()
+      process.standardError = errorPipe
+      process.standardOutput = FileHandle.nullDevice
+      try process.run()
+      process.waitUntilExit()
+
+      guard process.terminationStatus != 0 else { return }
+      let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+      let message =
+        String(data: errorData, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? "unknown"
+      if process.terminationStatus == -1743 || message.contains("-1743") {
+        throw EventCLIError.eventKitError(
+          "Reminders.app move to '\(targetListName)' was blocked by macOS Automation privacy. Grant this app access under System Settings → Privacy & Security → Automation → Reminders, then retry."
+        )
+      }
+      throw EventCLIError.eventKitError("Reminders.app move failed: \(message)")
+    }
+
+    static func escapeAppleScriptString(_ value: String) -> String {
+      value
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private func findReminder(
+      in list: EKCalendar, matchingTitle title: String, creationDate: Date?
+    ) -> EKReminder? {
+      let predicate = eventStore.predicateForReminders(in: [list])
+      var found: EKReminder?
+      let semaphore = DispatchSemaphore(value: 0)
+      eventStore.fetchReminders(matching: predicate) { reminders in
+        defer { semaphore.signal() }
+        guard let reminders else { return }
+        if let creationDate {
+          found = reminders.first {
+            ($0.title ?? "") == title
+              && $0.creationDate.map { abs($0.timeIntervalSince(creationDate)) < 1.0 } == true
+          }
+        }
+        if found == nil {
+          found = reminders.first { ($0.title ?? "") == title }
+        }
+      }
+      semaphore.wait()
+      return found
     }
   }
 
@@ -435,6 +566,7 @@
       try await updateReminder(
         id: id,
         title: params.title,
+        listName: nil,
         completed: params.completed,
         notes: params.notes,
         dueDate: params.dueDate,
