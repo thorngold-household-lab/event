@@ -18,7 +18,7 @@ enum ReminderURLStorage {
 
   static func exposedValues(notes: String?, nativeURL: URL?) -> ExposedValues {
     let split = splitManagedURL(from: notes)
-    return ExposedValues(notes: split.notes, url: nativeURL?.absoluteString ?? split.url)
+    return ExposedValues(notes: split.notes, url: split.url ?? nativeURL?.absoluteString)
   }
 
   private static func splitManagedURL(from notes: String?) -> ExposedValues {

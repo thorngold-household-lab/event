@@ -405,10 +405,9 @@
       }
 
       // Managed notes are authoritative because EKCalendarItem.url is rejected
-      // by some reminder stores. Clear a stale native value before the primary
-      // save so reads cannot return the previous URL.
+      // by some reminder stores. Do not touch the native URL before this save:
+      // even assigning nil dirties that provider-rejected property.
       if let url, URL(string: url) != nil {
-        ekReminder.url = nil
         ekReminder.notes = ReminderURLStorage.storing(url, in: ekReminder.notes)
       }
 

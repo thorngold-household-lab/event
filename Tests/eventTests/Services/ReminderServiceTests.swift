@@ -70,10 +70,19 @@
       XCTAssertEqual(exposed.url, "https://example.com/new")
     }
 
-    func testNativeURLTakesPrecedenceWhileManagedMetadataStaysHidden() {
+    func testManagedURLTakesPrecedenceOverStaleNativeURL() {
       let stored = ReminderURLStorage.storing("https://example.com/fallback", in: "Notes")
       let exposed = ReminderURLStorage.exposedValues(
         notes: stored, nativeURL: URL(string: "https://example.com/native")
+      )
+
+      XCTAssertEqual(exposed.notes, "Notes")
+      XCTAssertEqual(exposed.url, "https://example.com/fallback")
+    }
+
+    func testNativeURLIsUsedWhenManagedURLIsAbsent() {
+      let exposed = ReminderURLStorage.exposedValues(
+        notes: "Notes", nativeURL: URL(string: "https://example.com/native")
       )
 
       XCTAssertEqual(exposed.notes, "Notes")
@@ -135,7 +144,8 @@
       )
       XCTAssertLessThan(updateManaged, updatePrimarySave)
       XCTAssertLessThan(updatePrimarySave, updateNativeSave)
-      XCTAssertTrue(update.contains("ekReminder.url = nil"))
+      let updateBeforePrimarySave = String(update[..<updatePrimarySave])
+      XCTAssertFalse(updateBeforePrimarySave.contains("ekReminder.url ="))
       XCTAssertTrue(update.contains("|| url != nil"))
     }
 
