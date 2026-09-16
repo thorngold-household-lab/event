@@ -58,6 +58,7 @@
         .deletingLastPathComponent()
         .deletingLastPathComponent()
         .deletingLastPathComponent()
+        .deletingLastPathComponent()
       let serviceURL =
         packageRoot
         .appendingPathComponent("Sources/event/Services/ReminderService.swift")
