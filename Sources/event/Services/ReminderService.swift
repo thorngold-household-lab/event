@@ -230,11 +230,7 @@
             "Note: Advanced fields (tags, flagged, parentTitle, url) require Shortcut integration.")
           print("Use without --no-shortcuts to enable.")
         }
-        // Fallback for URL if shortcuts are disabled
-        if let url = url, let validURL = URL(string: url) {
-          ekReminder.url = validURL
-          try eventStore.save(ekReminder, commit: true)
-        }
+        // URL is already persisted by the primary EventKit save.
         return
       }
 
@@ -247,11 +243,7 @@
         isShortcutInstalled = try await shortcutsService.isShortcutInstalled(name: shortcutName)
       } catch {
         print("Note: Could not check for shortcut. Advanced features disabled.")
-        // Fallback for URL
-        if let url = url, let validURL = URL(string: url) {
-          ekReminder.url = validURL
-          try eventStore.save(ekReminder, commit: true)
-        }
+        // URL is already persisted by the primary EventKit save.
         return
       }
 
@@ -273,11 +265,7 @@
           return
         } catch {
           print("Note: Shortcut execution failed. Advanced features not set.")
-          // Fallback for URL
-          if let url = url, let validURL = URL(string: url) {
-            ekReminder.url = validURL
-            try eventStore.save(ekReminder, commit: true)
-          }
+          // URL is already persisted by the primary EventKit save.
           return
         }
       }
@@ -286,11 +274,7 @@
       print("Note: AdvancedReminderEdit shortcut not found.")
       print("Install it at: https://www.icloud.com/shortcuts/b578334075754da9ba6e50b501515808")
       print("Without it, only basic reminder fields (title, notes, dueDate, priority) can be set.")
-      // Fallback for URL
-      if let url = url, let validURL = URL(string: url) {
-        ekReminder.url = validURL
-        try eventStore.save(ekReminder, commit: true)
-      }
+      // URL is already persisted by the primary EventKit save.
     }
 
     /// Create reminder via EventKit (basic properties only)
@@ -322,9 +306,9 @@
         ekReminder.notes = notes
       }
 
-      // We no longer set URL here since it's handled by Shortcuts for better compatibility
-      // The fallback is handled in postProcessReminder if shortcuts are disabled
-      // Let EventKit create the item first, URL will be added later
+      // Persist the URL in the primary EventKit save. Shortcuts may still
+      // post-process it for richer Reminders.app presentation when enabled.
+      Self.applyURL(url, to: ekReminder)
 
       // Set due date
       if let dueDateString = dueDate {
@@ -410,9 +394,9 @@
         ekReminder.notes = notes
       }
 
-      // We no longer set URL here since it's handled by Shortcuts for better compatibility
-      // The fallback is handled in postProcessReminder if shortcuts are disabled
-      // Let EventKit create the item first, URL will be added later
+      // Persist the URL in the primary EventKit save. Shortcuts may still
+      // post-process it for richer Reminders.app presentation when enabled.
+      Self.applyURL(url, to: ekReminder)
 
       if clearDue {
         ekReminder.dueDateComponents = nil
@@ -442,7 +426,7 @@
       let hasFieldEdits =
         title != nil || completed != nil || notes != nil || dueDate != nil
         || clearDue || startDate != nil || clearStart || priority != nil
-        || locationTrigger != nil || clearLocation
+        || url != nil || locationTrigger != nil || clearLocation
       if hasFieldEdits {
         do {
           try eventStore.save(ekReminder, commit: true)
@@ -465,6 +449,11 @@
         throw EventCLIError.invalidInput("Reminder list name cannot be empty.")
       }
       return trimmed
+    }
+
+    static func applyURL(_ url: String?, to reminder: EKReminder) {
+      guard let url, let validURL = URL(string: url) else { return }
+      reminder.url = validURL
     }
 
     static func requiresListMove(to targetListName: String?, currentListName: String?) -> Bool {
