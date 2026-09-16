@@ -23,6 +23,9 @@
       let locationTrigger = ekReminder.alarms?.compactMap { LocationTrigger(from: $0) }.first
 
       let utcFormatter = ISO8601DateFormatter.syncISO8601
+      let exposed = ReminderURLStorage.exposedValues(
+        notes: ekReminder.notes, nativeURL: ekReminder.url
+      )
 
       self.init(
         id: ekReminder.calendarItemIdentifier,
@@ -30,8 +33,8 @@
         isCompleted: ekReminder.isCompleted,
         isFlagged: false,  // EKReminder has no isFlagged property
         list: ekReminder.calendar?.title ?? "Unknown",
-        notes: ekReminder.notes,
-        url: ekReminder.url?.absoluteString,
+        notes: exposed.notes,
+        url: exposed.url,
         location: ekReminder.location,
         timeZone: ekReminder.timeZone?.identifier,
         dueDate: dueDate,

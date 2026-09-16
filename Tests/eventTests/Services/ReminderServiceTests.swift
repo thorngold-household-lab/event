@@ -51,7 +51,36 @@
       XCTAssertEqual(reminder.url?.absoluteString, "https://example.com/existing")
     }
 
-    func testURLPersistenceUsesPrimaryCreateAndUpdateSaves() throws {
+    func testManagedURLFallbackRoundTripsWithoutChangingExposedNotes() {
+      let stored = ReminderURLStorage.storing(
+        "https://example.com/reminder?a=1&b=2", in: "User-authored notes"
+      )
+      let exposed = ReminderURLStorage.exposedValues(notes: stored, nativeURL: nil)
+
+      XCTAssertEqual(exposed.notes, "User-authored notes")
+      XCTAssertEqual(exposed.url, "https://example.com/reminder?a=1&b=2")
+    }
+
+    func testManagedURLFallbackHandlesMissingNotesAndReplacement() {
+      let initial = ReminderURLStorage.storing("https://example.com/old", in: nil)
+      let replaced = ReminderURLStorage.storing("https://example.com/new", in: initial)
+      let exposed = ReminderURLStorage.exposedValues(notes: replaced, nativeURL: nil)
+
+      XCTAssertNil(exposed.notes)
+      XCTAssertEqual(exposed.url, "https://example.com/new")
+    }
+
+    func testNativeURLTakesPrecedenceWhileManagedMetadataStaysHidden() {
+      let stored = ReminderURLStorage.storing("https://example.com/fallback", in: "Notes")
+      let exposed = ReminderURLStorage.exposedValues(
+        notes: stored, nativeURL: URL(string: "https://example.com/native")
+      )
+
+      XCTAssertEqual(exposed.notes, "Notes")
+      XCTAssertEqual(exposed.url, "https://example.com/native")
+    }
+
+    func testURLPersistenceCommitsManagedCopyBeforeNativeCompatibilitySave() throws {
       let testFile = URL(fileURLWithPath: #filePath)
       let packageRoot =
         testFile
@@ -81,14 +110,32 @@
       )
 
       XCTAssertFalse(postProcess.contains("eventStore.save"))
-      XCTAssertLessThan(
-        try XCTUnwrap(create.range(of: "Self.applyURL(url, to: ekReminder)")?.lowerBound),
-        try XCTUnwrap(create.range(of: "try eventStore.save(ekReminder, commit: true)")?.lowerBound)
+      let createManaged = try XCTUnwrap(
+        create.range(of: "ReminderURLStorage.storing(url, in: ekReminder.notes)")?.lowerBound
       )
-      XCTAssertLessThan(
-        try XCTUnwrap(update.range(of: "Self.applyURL(url, to: ekReminder)")?.lowerBound),
-        try XCTUnwrap(update.range(of: "let hasFieldEdits")?.lowerBound)
+      let createPrimarySave = try XCTUnwrap(
+        create.range(of: "try eventStore.save(ekReminder, commit: true)")?.lowerBound
       )
+      let createNativeSave = try XCTUnwrap(
+        create.range(of: "persistNativeURLIfSupported(url, on: ekReminder)")?.lowerBound
+      )
+      XCTAssertLessThan(createManaged, createPrimarySave)
+      XCTAssertLessThan(createPrimarySave, createNativeSave)
+
+      let updateManaged = try XCTUnwrap(
+        update.range(
+          of: "ReminderURLStorage.storing(url, in: ekReminder.notes)", options: .backwards
+        )?.lowerBound
+      )
+      let updatePrimarySave = try XCTUnwrap(
+        update.range(of: "try eventStore.save(ekReminder, commit: true)")?.lowerBound
+      )
+      let updateNativeSave = try XCTUnwrap(
+        update.range(of: "persistNativeURLIfSupported(url, on: ekReminder)")?.lowerBound
+      )
+      XCTAssertLessThan(updateManaged, updatePrimarySave)
+      XCTAssertLessThan(updatePrimarySave, updateNativeSave)
+      XCTAssertTrue(update.contains("ekReminder.url = nil"))
       XCTAssertTrue(update.contains("|| url != nil"))
     }
 

@@ -306,9 +306,11 @@
         ekReminder.notes = notes
       }
 
-      // Persist the URL in the primary EventKit save. Shortcuts may still
-      // post-process it for richer Reminders.app presentation when enabled.
-      Self.applyURL(url, to: ekReminder)
+      // Store a managed copy before the primary save. Some reminder stores reject
+      // EKCalendarItem.url even for valid URLs, while notes round-trip reliably.
+      if let url, URL(string: url) != nil {
+        ekReminder.notes = ReminderURLStorage.storing(url, in: ekReminder.notes)
+      }
 
       // Set due date
       if let dueDateString = dueDate {
@@ -328,6 +330,7 @@
       }
 
       try eventStore.save(ekReminder, commit: true)
+      persistNativeURLIfSupported(url, on: ekReminder)
       return ekReminder.calendarItemIdentifier
     }
 
@@ -350,6 +353,9 @@
       guard let original = eventStore.calendarItem(withIdentifier: id) as? EKReminder else {
         throw EventCLIError.notFound("Reminder with ID '\(id)' not found")
       }
+      let originalManagedURL = ReminderURLStorage.exposedValues(
+        notes: original.notes, nativeURL: nil
+      ).url
 
       // Validate and resolve every non-mutating input before committing a move.
       let parsedDueDate = try dueDate.map { dateString in
@@ -391,12 +397,20 @@
       }
 
       if let notes = notes {
-        ekReminder.notes = notes
+        if url == nil, let originalManagedURL {
+          ekReminder.notes = ReminderURLStorage.storing(originalManagedURL, in: notes)
+        } else {
+          ekReminder.notes = notes
+        }
       }
 
-      // Persist the URL in the primary EventKit save. Shortcuts may still
-      // post-process it for richer Reminders.app presentation when enabled.
-      Self.applyURL(url, to: ekReminder)
+      // Managed notes are authoritative because EKCalendarItem.url is rejected
+      // by some reminder stores. Clear a stale native value before the primary
+      // save so reads cannot return the previous URL.
+      if let url, URL(string: url) != nil {
+        ekReminder.url = nil
+        ekReminder.notes = ReminderURLStorage.storing(url, in: ekReminder.notes)
+      }
 
       if clearDue {
         ekReminder.dueDateComponents = nil
@@ -439,6 +453,7 @@
           throw error
         }
       }
+      persistNativeURLIfSupported(url, on: ekReminder)
       return ekReminder.calendarItemIdentifier
     }
 
@@ -454,6 +469,17 @@
     static func applyURL(_ url: String?, to reminder: EKReminder) {
       guard let url, let validURL = URL(string: url) else { return }
       reminder.url = validURL
+    }
+
+    private func persistNativeURLIfSupported(_ url: String?, on reminder: EKReminder) {
+      guard let url, URL(string: url) != nil else { return }
+      Self.applyURL(url, to: reminder)
+      do {
+        try eventStore.save(reminder, commit: true)
+      } catch {
+        // The managed notes copy was committed first and remains authoritative.
+        reminder.url = nil
+      }
     }
 
     static func requiresListMove(to targetListName: String?, currentListName: String?) -> Bool {
