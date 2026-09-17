@@ -158,6 +158,29 @@
       return String(source[startIndex..<endIndex])
     }
 
+    func testManagedURLDoesNotRequireAdvancedProcessing() {
+      XCTAssertFalse(
+        ReminderService.needsAdvancedProcessing(
+          tags: nil, parentTitle: nil, flagged: nil, url: "https://example.com/managed"
+        )
+      )
+      XCTAssertTrue(
+        ReminderService.needsAdvancedProcessing(
+          tags: "test", parentTitle: nil, flagged: nil, url: nil
+        )
+      )
+      XCTAssertTrue(
+        ReminderService.needsAdvancedProcessing(
+          tags: nil, parentTitle: "parent", flagged: nil, url: nil
+        )
+      )
+      XCTAssertTrue(
+        ReminderService.needsAdvancedProcessing(
+          tags: nil, parentTitle: nil, flagged: false, url: nil
+        )
+      )
+    }
+
     // MARK: - removeLocationAlarms
 
     func testRemoveLocationAlarmsPreservesTimeBasedAlarms() throws {

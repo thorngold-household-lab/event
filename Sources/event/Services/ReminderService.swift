@@ -93,8 +93,10 @@
         locationTrigger: locationTrigger
       )
 
-      // Step 2: Post-process with advanced features if needed (tags, flagged, parentTitle, url)
-      if needsAdvancedProcessing(tags: tags, parentTitle: parentTitle, flagged: flagged, url: url) {
+      // Step 2: Post-process Shortcut-only fields if needed.
+      if Self.needsAdvancedProcessing(
+        tags: tags, parentTitle: parentTitle, flagged: flagged, url: url
+      ) {
         try await postProcessReminder(
           id: reminderId,
           tags: tags,
@@ -149,7 +151,9 @@
       )
 
       // Step 2: Post-process with advanced features if needed
-      if needsAdvancedProcessing(tags: tags, parentTitle: parentTitle, flagged: flagged, url: url) {
+      if Self.needsAdvancedProcessing(
+        tags: tags, parentTitle: parentTitle, flagged: flagged, url: url
+      ) {
         try await postProcessReminder(
           id: updatedId,
           tags: tags,
@@ -192,10 +196,12 @@
     // MARK: - Helper Functions
 
     /// Check if advanced processing is needed
-    private func needsAdvancedProcessing(
+    static func needsAdvancedProcessing(
       tags: String?, parentTitle: String?, flagged: Bool?, url: String?
     ) -> Bool {
-      return tags != nil || parentTitle != nil || flagged != nil || url != nil
+      // URL persistence is handled by managed notes and best-effort native EventKit.
+      // Treating URL as Shortcut-only prints non-JSON status before JSON output.
+      return tags != nil || parentTitle != nil || flagged != nil
     }
 
     /// Fetch a reminder by ID
@@ -225,9 +231,11 @@
 
       // If shortcuts are disabled, skip entirely
       if !useShortcuts {
-        if tags != nil || parentTitle != nil || flagged != nil || url != nil {
+        if Self.needsAdvancedProcessing(
+          tags: tags, parentTitle: parentTitle, flagged: flagged, url: url
+        ) {
           print(
-            "Note: Advanced fields (tags, flagged, parentTitle, url) require Shortcut integration.")
+            "Note: Advanced fields (tags, flagged, parentTitle) require Shortcut integration.")
           print("Use without --no-shortcuts to enable.")
         }
         // URL is already persisted by the primary EventKit save.
