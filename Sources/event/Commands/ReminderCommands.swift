@@ -230,6 +230,9 @@ struct ReminderCommands: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "New title")
     var title: String?
 
+    @Option(name: .shortAndLong, help: "Move to reminder list")
+    var list: String?
+
     @Option(name: .shortAndLong, help: "Mark as completed (true/false)")
     var completed: Bool?
 
@@ -274,6 +277,16 @@ struct ReminderCommands: AsyncParsableCommand {
     @Flag(help: "Output in JSON format")
     var json = false
 
+    static func validateListOptionSupported(
+      _ listName: String?, eventKitAvailable: Bool
+    ) throws {
+      if listName != nil, !eventKitAvailable {
+        throw EventCLIError.invalidInput(
+          "Moving reminders between lists is only supported on macOS."
+        )
+      }
+    }
+
     func run() async throws {
       if clearDue, due != nil {
         throw EventCLIError.invalidInput("Use either --due or --clear-due, not both.")
@@ -296,6 +309,7 @@ struct ReminderCommands: AsyncParsableCommand {
         let reminder = try await service.updateReminder(
           id: id,
           title: title,
+          listName: list,
           completed: completed,
           notes: notes,
           dueDate: due,
@@ -312,6 +326,7 @@ struct ReminderCommands: AsyncParsableCommand {
           useShortcuts: !noShortcuts
         )
       #else
+        try Self.validateListOptionSupported(list, eventKitAvailable: false)
         let backend = try await BackendFactory.makeRemindersBackend()
         let params = UpdateReminderParams(
           title: title,
